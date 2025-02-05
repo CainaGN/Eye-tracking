@@ -2,167 +2,160 @@ import cv2
 import mediapipe as mp
 import pyautogui
 import numpy as np
+from enum import Enum, auto
 
-# Configuração inicial
-pyautogui.FAILSAFE = False  # Desabilitar o fail-safe para evitar travamentos
+pyautogui.FAILSAFE = False
 
-# Configurações do MediaPipe
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    refine_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
+class FaceMeshConfig:
+    def __init__(self):
+        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        self.drawing_spec = mp.solutions.drawing_utils.DrawingSpec(thickness=1, circle_radius=1)
+        self.tesselation_style = mp.solutions.drawing_styles.get_default_face_mesh_tesselation_style()
 
-# Objeto para desenhar annotations
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+class CalibrationPhase(Enum):
+    TOP = auto()
+    BOTTOM = auto()
+    LEFT = auto()
+    RIGHT = auto()
 
-# Função para calcular o EAR (Eye Aspect Ratio)
-def calculate_ear(landmarks, eye_indices):
-    # Obter os pontos do olho
-    eye = np.array([(landmarks[idx].x, landmarks[idx].y) for idx in eye_indices])
-    # Converter para coordenadas de pixel
-    eye = eye * np.array([img_width, img_height])
-    # Cálculo do EAR
-    A = np.linalg.norm(eye[1] - eye[5])  # Distância vertical
-    B = np.linalg.norm(eye[2] - eye[4])  # Outra distância vertical
-    C = np.linalg.norm(eye[0] - eye[3])  # Distância horizontal
-    ear = (A + B) / (2.0 * C)
-    return ear
-
-# Função para mapear coordenadas do rosto para a tela
-def map_to_screen(pos, calibration_data, screen_size):
-    # Evitar valores inválidos na calibragem
-    if calibration_data["left"][0] == calibration_data["right"][0]:
-        calibration_data["right"][0] += 1
-    if calibration_data["top"][1] == calibration_data["bottom"][1]:
-        calibration_data["bottom"][1] += 1
-
-    x = np.interp(pos[0], [calibration_data["right"][0], calibration_data["left"][0]], [10, screen_size[0] - 10])
-    y = np.interp(pos[1], [calibration_data["top"][1], calibration_data["bottom"][1]], [10, screen_size[1] - 10])
-    return np.clip([x, y], [0, 0], screen_size)
-
-# Índices dos landmarks para os olhos no MediaPipe
-LEFT_EYE_INDICES = [33, 160, 158, 133, 153, 144]  # Ajustados para cálculo do EAR
-RIGHT_EYE_INDICES = [362, 385, 387, 263, 373, 380]  # Ajustados para cálculo do EAR
-
-# Parâmetros de calibragem
-calibration_data = {"top": None, "bottom": None, "right": None, "left": None}
-calibration_phase = ["top", "bottom", "left", "right"]
-calibration_text = ["cima", "baixo", "direita", "esquerda"]
-current_phase = 0
-calibrating = True
-
-# Constantes para a detecção de piscadas
-EYE_AR_THRESHOLD = 0.21  # Limite para considerar uma piscada (ajuste baseado em testes)
-EYE_AR_CONSEC_FRAMES = 3  # Número mínimo de frames consecutivos para detectar piscada
-blink_counter = 0
-blink_detected = False
-
-# Iniciar captura de vídeo
-cap = cv2.VideoCapture(0)
-screen_width, screen_height = pyautogui.size()
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+class EyeTracker:
+    def __init__(self):
+        self.screen_width, self.screen_height = pyautogui.size()
+        self.video_capture = cv2.VideoCapture(0)
         
-    frame = cv2.flip(frame, 1)
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    img_height, img_width, _ = frame.shape
-    results = face_mesh.process(frame_rgb)
+        self.eye_aspect_ratio_threshold = 0.21
+        self.consecutive_frames_for_blink = 3
+        self.blink_counter = 0
+        self.blink_detected = False
+        
+        self.calibration_bounds = {
+            CalibrationPhase.TOP: None,
+            CalibrationPhase.BOTTOM: None,
+            CalibrationPhase.LEFT: None,
+            CalibrationPhase.RIGHT: None
+        }
+        self.current_calibration_phase = CalibrationPhase.TOP
+        self.calibration_in_progress = True
+        
+        self.face_processor = FaceMeshConfig()
+        self.left_eye_indices = [33, 160, 158, 133, 153, 144]
+        self.right_eye_indices = [362, 385, 387, 263, 373, 380]
 
-    if results.multi_face_landmarks:
-        for face_landmarks in results.multi_face_landmarks:
-            landmarks = face_landmarks.landmark
+    def calculate_eye_aspect_ratio(self, landmarks, eye_indices):
+        eye_points = np.array([(landmarks[idx].x, landmarks[idx].y) for idx in eye_indices])
+        eye_points *= np.array([self.frame_width, self.frame_height])
+        
+        vertical_distances = [
+            np.linalg.norm(eye_points[1] - eye_points[5]),
+            np.linalg.norm(eye_points[2] - eye_points[4])
+        ]
+        horizontal_distance = np.linalg.norm(eye_points[0] - eye_points[3])
+        
+        return sum(vertical_distances) / (2.0 * horizontal_distance)
 
-            if calibrating:
-                # Mostrar instruções para calibragem
-                cv2.putText(
-                    frame,
-                    f"Olhe para {calibration_text[current_phase]} e pressione 'c'",
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (0, 255, 0),
-                    2
-                )
+    def map_head_position_to_screen(self, head_position):
+        calibration = self.calibration_bounds
+        screen_x = np.interp(head_position[0], 
+                           [calibration[CalibrationPhase.LEFT][0], calibration[CalibrationPhase.RIGHT][0]], 
+                           [10, self.screen_width - 10])
+        screen_y = np.interp(head_position[1],
+                           [calibration[CalibrationPhase.TOP][1], calibration[CalibrationPhase.BOTTOM][1]],
+                           [10, self.screen_height - 10])
+        return np.clip([screen_x, screen_y], [0, 0], [self.screen_width, self.screen_height])
+        
+    def smooth_mouse_movement(self, target_position):
+        current_x, current_y = pyautogui.position()
+        smoothing_factor = 0.2
+        new_x = int(current_x + (target_position[0] - current_x) * smoothing_factor)
+        new_y = int(current_y + (target_position[1] - current_y) * smoothing_factor)
+        return new_x, new_y
+
+    def process_calibration(self, landmarks):
+        cv2.putText(self.frame, 
+                   f"Look {self.current_calibration_phase.name.lower()} and press 'c'",
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        
+        if cv2.waitKey(1) & 0xFF == ord('c'):
+            self.calibration_bounds[self.current_calibration_phase] = (
+                landmarks[1].x * self.frame_width,
+                landmarks[1].y * self.frame_height
+            )
+            
+            if self.current_calibration_phase == CalibrationPhase.RIGHT:
+                self.calibration_in_progress = False
+                print("Calibration complete:", self.calibration_bounds)
+            else:
+                self.current_calibration_phase = CalibrationPhase(self.current_calibration_phase.value + 1)
+
+    def process_face_movement(self, landmarks):
+        nose_position = (
+            landmarks[1].x * self.frame_width,
+            landmarks[1].y * self.frame_height
+        )
+        
+        screen_position = self.map_head_position_to_screen(nose_position)
+        smoothed_position = self.smooth_mouse_movement(screen_position)
+        pyautogui.moveTo(*smoothed_position)
+        
+        cv2.putText(self.frame, f"Cursor: {smoothed_position}",
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+    def detect_blink(self, landmarks):
+        left_eye_ratio = self.calculate_eye_aspect_ratio(landmarks, self.left_eye_indices)
+        right_eye_ratio = self.calculate_eye_aspect_ratio(landmarks, self.right_eye_indices)
+        average_ratio = (left_eye_ratio + right_eye_ratio) / 2
+
+        if average_ratio < self.eye_aspect_ratio_threshold:
+            self.blink_counter += 1
+        else:
+            if self.blink_counter >= self.consecutive_frames_for_blink:
+                self.blink_detected = True
+            self.blink_counter = 0
+
+        if self.blink_detected:
+            pyautogui.click()
+            self.blink_detected = False
+
+    def run(self):
+        while self.video_capture.isOpened():
+            success, self.frame = self.video_capture.read()
+            if not success:
+                break
                 
-                # Se pressionar 'c', salvar coordenadas
-                if cv2.waitKey(1) & 0xFF == ord('c'):
-                    calibration_data[calibration_phase[current_phase]] = np.array(
-                        [landmarks[1].x * img_width, landmarks[1].y * img_height]
+            self.frame = cv2.flip(self.frame, 1)
+            self.frame_height, self.frame_width, _ = self.frame.shape
+            rgb_frame = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
+            
+            face_landmarks = self.face_processor.face_mesh.process(rgb_frame)
+            
+            if face_landmarks.multi_face_landmarks:
+                for landmarks in face_landmarks.multi_face_landmarks:
+                    if self.calibration_in_progress:
+                        self.process_calibration(landmarks.landmark)
+                        break
+                    else:
+                        self.process_face_movement(landmarks.landmark)
+                        self.detect_blink(landmarks.landmark)
+                    
+                    mp.solutions.drawing_utils.draw_landmarks(
+                        image=self.frame,
+                        landmark_list=landmarks,
+                        connections=mp.solutions.face_mesh.FACEMESH_TESSELATION,
+                        landmark_drawing_spec=self.face_processor.drawing_spec,
+                        connection_drawing_spec=self.face_processor.tesselation_style
                     )
-                    current_phase += 1
 
-                    # Finalizar calibragem após os quatro pontos
-                    if current_phase >= len(calibration_phase):
-                        calibrating = False
-                        print("Calibragem concluída:", calibration_data)
-                # Importante: precisamos de um 'break' aqui para evitar múltiplas leituras durante a calibragem
+            cv2.imshow('Head Tracking Interface', self.frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
-            else:
-                # Calcular direção da cabeça
-                nose_tip = np.array([landmarks[1].x * img_width, landmarks[1].y * img_height])
-                nose_position = nose_tip
+        self.video_capture.release()
+        cv2.destroyAllWindows()
 
-                # Mapear a direção da cabeça para a tela
-                screen_pos = map_to_screen(nose_position, calibration_data, (screen_width, screen_height))
-                
-                # Introduzir suavidade nos movimentos (limite de velocidade)
-                current_mouse_pos = pyautogui.position()
-                new_mouse_pos = [
-                    int(current_mouse_pos[0] + (screen_pos[0] - current_mouse_pos[0]) * 0.2),
-                    int(current_mouse_pos[1] + (screen_pos[1] - current_mouse_pos[1]) * 0.2)
-                ]
-                pyautogui.moveTo(new_mouse_pos[0], new_mouse_pos[1])
-
-                # Exibir posição do cursor
-                cv2.putText(
-                    frame,
-                    f"Cursor: {new_mouse_pos}",
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (0, 255, 0),
-                    2
-                )
-
-                # Detectar piscadas
-                left_ear = calculate_ear(landmarks, LEFT_EYE_INDICES)
-                right_ear = calculate_ear(landmarks, RIGHT_EYE_INDICES)
-                avg_ear = (left_ear + right_ear) / 2.0
-
-                if avg_ear < EYE_AR_THRESHOLD:
-                    blink_counter += 1
-                else:
-                    if blink_counter >= EYE_AR_CONSEC_FRAMES:
-                        blink_detected = True
-                    blink_counter = 0
-
-                if blink_detected:
-                    pyautogui.click()  # Simular clique do mouse
-                    blink_detected = False
-
-            # Desenhar os landmarks
-            mp_drawing.draw_landmarks(
-                image=frame,
-                landmark_list=face_landmarks,
-                connections=mp_face_mesh.FACEMESH_TESSELATION,
-                landmark_drawing_spec=None,
-                connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_tesselation_style()
-            )
-
-    # Mostrar o frame
-    cv2.imshow('Head Direction Calibration', frame)
-
-    # Sair ao pressionar 'q'
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-# Liberar captura e fechar janelas
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    tracker = EyeTracker()
+    tracker.run()
