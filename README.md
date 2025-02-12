@@ -2,9 +2,14 @@
 
 Este projeto utiliza a biblioteca MediaPipe para rastrear movimentos faciais e controlar o cursor do mouse com base na direção da cabeça. Além disso, ele detecta piscadas para simular cliques do mouse. O código é escrito em Python e depende de algumas bibliotecas externas.
 
+## Autores:
+
+- Cainã Gonçalves Nascimento
+- Glaicon Farias Felipe
+
 ## Requisitos
 
-- Python 3.8 ou superior
+- Python
 - Webcam funcional
 - Bibliotecas Python:
   - OpenCV (`cv2`)
