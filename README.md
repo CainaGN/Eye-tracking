@@ -5,7 +5,6 @@ Este projeto utiliza a biblioteca MediaPipe para rastrear movimentos faciais e c
 ## Autores:
 
 - Cainã Gonçalves Nascimento
-- Glaicon Farias Felipe
 
 ## Requisitos
 
